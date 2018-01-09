@@ -1,6 +1,6 @@
 // This includes the precompiled header. Change this to whatever is relevant for your project.
 #include "Master_Project.h"
- 
+
 #include "ImageLoader.h"
 #include "Runtime/ImageWrapper/Public/IImageWrapper.h"
 #include "Runtime/ImageWrapper/Public/IImageWrapperModule.h"
@@ -11,7 +11,7 @@
 #define UIL_LOG(Verbosity, Format, ...)	UE_LOG(LogTemp, Verbosity, Format, __VA_ARGS__)
 
 // Module loading is not allowed outside of the main thread, so we load the ImageWrapper module ahead of time.
-static IImageWrapperModule& ImageWrapperModule = FModuleManager::LoadModuleChecked<IImageWrapperModule>(TEXT("ImageWrapper"));
+//static IImageWrapperModule& ImageWrapperModule = FModuleManager::LoadModuleChecked<IImageWrapperModule>(TEXT("ImageWrapper"));
 
 UImageLoader* UImageLoader::LoadImageFromDiskAsync(UObject* Outer, const FString& ImagePath)
 {
@@ -62,6 +62,7 @@ UTexture2D* UImageLoader::LoadImageFromDisk(UObject* Outer, const FString& Image
 	}
 
 	// Detect the image type using the ImageWrapper module
+	IImageWrapperModule& ImageWrapperModule = FModuleManager::Get().LoadModuleChecked<IImageWrapperModule>(TEXT("ImageWrapper"));
 	EImageFormat ImageFormat = ImageWrapperModule.DetectImageFormat(FileData.GetData(), FileData.Num());
 	if (ImageFormat == EImageFormat::Invalid)
 	{
@@ -87,7 +88,7 @@ UTexture2D* UImageLoader::LoadImageFromDisk(UObject* Outer, const FString& Image
 		return nullptr;
 	}
 
-	// Create the texture and upload the uncompressed image data
+	// Create the texture and upload the uncompressed image data  
 	FString TextureBaseName = TEXT("Texture_") + FPaths::GetBaseFilename(ImagePath);
 	return CreateTexture(Outer, *RawData, ImageWrapper->GetWidth(), ImageWrapper->GetHeight(), EPixelFormat::PF_B8G8R8A8, FName(*TextureBaseName));
 }
