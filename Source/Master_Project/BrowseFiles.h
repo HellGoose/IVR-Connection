@@ -3,7 +3,7 @@
 #pragma once
 
 #include "ImageUtils.h"
-#include "ImageWrapper.h"
+#include "Runtime/ImageWrapper/Public/IImageWrapper.h"
 
 #include "Kismet/BlueprintFunctionLibrary.h"
 #include "BrowseFiles.generated.h"

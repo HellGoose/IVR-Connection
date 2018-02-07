@@ -2,7 +2,6 @@
 
 #include "VRBaseCharacter.h"
 #include "VRPathFollowingComponent.h"
-#include "GripMotionControllerComponent.h"
 //#include "Runtime/Engine/Private/EnginePrivate.h"
 
 FName AVRBaseCharacter::LeftMotionControllerComponentName(TEXT("Left Grip Motion Controller"));
@@ -37,6 +36,7 @@ AVRBaseCharacter::AVRBaseCharacter(const FObjectInitializer& ObjectInitializer)
 	{
 		VRReplicatedCamera->bOffsetByHMD = false;
 		VRReplicatedCamera->SetupAttachment(NetSmoother);
+		VRReplicatedCamera->OverrideSendTransform = &AVRBaseCharacter::Server_SendTransformCamera;
 	}
 
 	VRMovementReference = NULL;
@@ -45,13 +45,6 @@ AVRBaseCharacter::AVRBaseCharacter(const FObjectInitializer& ObjectInitializer)
 		VRMovementReference = Cast<UVRBaseCharacterMovementComponent>(GetMovementComponent());
 		//AddTickPrerequisiteComponent(this->GetCharacterMovement());
 	}
-
-	/*VRHeadCollider = CreateDefaultSubobject<UCapsuleComponent>(TEXT("VR Head Collider"));
-	if (VRHeadCollider && VRReplicatedCamera)
-	{
-		VRHeadCollider->SetCapsuleSize(20.0f, 25.0f);
-		VRHeadCollider->SetupAttachment(VRReplicatedCamera);
-	}*/
 
 	ParentRelativeAttachment = CreateDefaultSubobject<UParentRelativeAttachmentComponent>(AVRBaseCharacter::ParentRelativeAttachmentComponentName);
 	if (ParentRelativeAttachment && VRReplicatedCamera)
@@ -68,12 +61,8 @@ AVRBaseCharacter::AVRBaseCharacter(const FObjectInitializer& ObjectInitializer)
 		LeftMotionController->Hand = EControllerHand::Left;
 		LeftMotionController->bOffsetByHMD = false;
 		// Keep the controllers ticking after movement
-		if (VRReplicatedCamera)
-		{
-			LeftMotionController->AddTickPrerequisiteComponent(GetCharacterMovement());
-		}
-
-
+		LeftMotionController->AddTickPrerequisiteComponent(GetCharacterMovement());
+		LeftMotionController->OverrideSendTransform = &AVRBaseCharacter::Server_SendTransformLeftController;
 	}
 
 	RightMotionController = CreateDefaultSubobject<UGripMotionControllerComponent>(AVRBaseCharacter::RightMotionControllerComponentName);
@@ -83,10 +72,8 @@ AVRBaseCharacter::AVRBaseCharacter(const FObjectInitializer& ObjectInitializer)
 		RightMotionController->Hand = EControllerHand::Right;
 		RightMotionController->bOffsetByHMD = false;
 		// Keep the controllers ticking after movement
-		if (VRReplicatedCamera)
-		{
-			RightMotionController->AddTickPrerequisiteComponent(GetCharacterMovement());
-		}
+		RightMotionController->AddTickPrerequisiteComponent(GetCharacterMovement());
+		RightMotionController->OverrideSendTransform = &AVRBaseCharacter::Server_SendTransformRightController;
 	}
 
 	OffsetComponentToWorld = FTransform(FQuat(0.0f, 0.0f, 0.0f, 1.0f), FVector::ZeroVector, FVector(1.0f));
@@ -97,6 +84,93 @@ AVRBaseCharacter::AVRBaseCharacter(const FObjectInitializer& ObjectInitializer)
 	MinNetUpdateFrequency = 100.0f;
 }
 
+//=============================================================================
+void AVRBaseCharacter::GetLifetimeReplicatedProps(TArray< class FLifetimeProperty > & OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+	DOREPLIFETIME_CONDITION(AVRBaseCharacter, SeatInformation, COND_OwnerOnly);
+}
+
+bool AVRBaseCharacter::Server_SetSeatedMode_Validate(USceneComponent * SeatParent, bool bSetSeatedMode, FVector_NetQuantize100 TargetLoc, float TargetYaw, float AllowedRadius, float AllowedRadiusThreshold, bool bZeroToHead)
+{
+	return true;
+}
+
+void AVRBaseCharacter::Server_SetSeatedMode_Implementation(USceneComponent * SeatParent, bool bSetSeatedMode, FVector_NetQuantize100 TargetLoc, float TargetYaw, float AllowedRadius, float AllowedRadiusThreshold, bool bZeroToHead)
+{
+	SetSeatedMode(SeatParent, bSetSeatedMode, TargetLoc, TargetYaw, AllowedRadius, AllowedRadiusThreshold, bZeroToHead);
+}
+
+void AVRBaseCharacter::Server_ReZeroSeating_Implementation(FVector_NetQuantize100 NewRelativeHeadLoc, float NewRelativeHeadYaw, bool bZeroToHead = true)
+{
+	if (FMath::IsNearlyEqual(SeatInformation.StoredYaw, NewRelativeHeadYaw) && SeatInformation.StoredLocation.Equals(NewRelativeHeadLoc))
+		return;
+
+	SeatInformation.StoredYaw = NewRelativeHeadYaw;
+	SeatInformation.StoredLocation = NewRelativeHeadLoc;
+
+	// Null out Z so we keep feet location if not zeroing to head
+	if (!bZeroToHead)
+		SeatInformation.StoredLocation.Z = 0.0f;
+
+	OnRep_SeatedCharInfo();
+}
+
+bool AVRBaseCharacter::Server_ReZeroSeating_Validate(FVector_NetQuantize100 NewLoc, float NewYaw, bool bZeroToHead = true)
+{
+	return true;
+}
+
+void AVRBaseCharacter::OnCustomMoveActionPerformed_Implementation(EVRMoveAction MoveActionType, FVector MoveActionVector, FRotator MoveActionRotator)
+{
+
+}
+
+void AVRBaseCharacter::OnBeginWallPushback_Implementation(FHitResult HitResultOfImpact, bool bHadLocomotionInput, FVector HmdInput)
+{
+
+}
+
+void AVRBaseCharacter::OnEndWallPushback_Implementation()
+{
+
+}
+
+void AVRBaseCharacter::Server_SendTransformCamera_Implementation(FBPVRComponentPosRep NewTransform)
+{
+	if(VRReplicatedCamera)
+		VRReplicatedCamera->Server_SendCameraTransform_Implementation(NewTransform);
+}
+
+bool AVRBaseCharacter::Server_SendTransformCamera_Validate(FBPVRComponentPosRep NewTransform)
+{
+	return true;
+	// Optionally check to make sure that player is inside of their bounds and deny it if they aren't?
+}
+
+void AVRBaseCharacter::Server_SendTransformLeftController_Implementation(FBPVRComponentPosRep NewTransform)
+{
+	if (LeftMotionController)
+		LeftMotionController->Server_SendControllerTransform_Implementation(NewTransform);
+}
+
+bool AVRBaseCharacter::Server_SendTransformLeftController_Validate(FBPVRComponentPosRep NewTransform)
+{
+	return true;
+	// Optionally check to make sure that player is inside of their bounds and deny it if they aren't?
+}
+
+void AVRBaseCharacter::Server_SendTransformRightController_Implementation(FBPVRComponentPosRep NewTransform)
+{
+	if(RightMotionController)
+		RightMotionController->Server_SendControllerTransform_Implementation(NewTransform);
+}
+
+bool AVRBaseCharacter::Server_SendTransformRightController_Validate(FBPVRComponentPosRep NewTransform)
+{
+	return true;
+	// Optionally check to make sure that player is inside of their bounds and deny it if they aren't?
+}
 FVector AVRBaseCharacter::GetTeleportLocation(FVector OriginalLocation)
 {	
 	return OriginalLocation;

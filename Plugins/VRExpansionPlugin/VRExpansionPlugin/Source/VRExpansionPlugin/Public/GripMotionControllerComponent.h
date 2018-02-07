@@ -8,9 +8,14 @@
 #include "SceneViewExtension.h"
 #include "VRBPDatatypes.h"
 #include "MotionControllerComponent.h"
+#include "LateUpdateManager.h"
+#include "IXRTrackingSystem.h"
 #include "VRGripInterface.h"
+#include "VRGlobalSettings.h"
 
 #include "GripMotionControllerComponent.generated.h"
+
+class AVRBaseCharacter;
 
 /**
 *
@@ -66,6 +71,10 @@ public:
 
 };
 
+
+/**
+* An override of the MotionControllerComponent that implements position replication and Gripping with grip replication and controllable late updates per object.
+*/
 UCLASS(Blueprintable, meta = (BlueprintSpawnableComponent), ClassGroup = MotionController)
 class VREXPANSIONPLUGIN_API UGripMotionControllerComponent : public UMotionControllerComponent//PrimitiveComponent
 {
@@ -90,6 +99,7 @@ private:
 	virtual void OnUnregister() override;
 	virtual void PreReplication(IRepChangedPropertyTracker & ChangedPropertyTracker) override;
 	virtual void Deactivate() override;
+	virtual void BeginDestroy() override;
 
 protected:
 	//~ Begin UActorComponent Interface.
@@ -110,11 +120,11 @@ public:
 	// Locally Gripped Array functions
 
 	// Notify a client that their local grip was bad
-	UFUNCTION(BlueprintCallable, Reliable, Client, WithValidation, Category = "VRGrip")
+	UFUNCTION(Reliable, Client, WithValidation, Category = "VRGrip")
 	void Client_NotifyInvalidLocalGrip(UObject * LocallyGrippedObject);
 
 	// Notify the server that we locally gripped something
-	UFUNCTION(BlueprintCallable, Reliable, Server, WithValidation, Category = "VRGrip")
+	UFUNCTION(Reliable, Server, WithValidation, Category = "VRGrip")
 	void Server_NotifyLocalGripAddedOrChanged(const FBPActorGripInformation & newGrip);
 
 	// Notify the server that we changed some secondary attachment information
@@ -192,6 +202,15 @@ public:
 			// Manage lerp states
 			if (Grip.ValueCache.bCachedHasSecondaryAttachment != Grip.SecondaryGripInfo.bHasSecondaryAttachment || Grip.ValueCache.CachedSecondaryRelativeLocation != Grip.SecondaryGripInfo.SecondaryRelativeLocation)
 			{
+				// Reset the secondary grip distance
+				Grip.SecondaryGripInfo.SecondaryGripDistance = 0.0f;
+
+				const UVRGlobalSettings& VRSettings = *GetDefault<UVRGlobalSettings>();
+				Grip.AdvancedGripSettings.SecondaryGripSettings.SmoothingOneEuro.CutoffSlope = VRSettings.OneEuroCutoffSlope;
+				Grip.AdvancedGripSettings.SecondaryGripSettings.SmoothingOneEuro.DeltaCutoff = VRSettings.OneEuroDeltaCutoff;
+				Grip.AdvancedGripSettings.SecondaryGripSettings.SmoothingOneEuro.MinCutoff = VRSettings.OneEuroMinCutoff;
+				Grip.AdvancedGripSettings.SecondaryGripSettings.SmoothingOneEuro.ResetSmoothingFilter();
+				
 				if (FMath::IsNearlyZero(Grip.SecondaryGripInfo.LerpToRate)) // Zero, could use IsNearlyZero instead
 					Grip.SecondaryGripInfo.GripLerpState = EGripLerpState::NotLerping;
 				else
@@ -234,7 +253,7 @@ public:
 			else // If re-creating the grip anyway we don't need to do the below
 			{
 				// If the stiffness and damping got changed server side
-				if ( !FMath::IsNearlyEqual(Grip.ValueCache.CachedStiffness, Grip.Stiffness) || !FMath::IsNearlyEqual(Grip.ValueCache.CachedDamping, Grip.Damping) || Grip.ValueCache.CachedAdvancedPhysicsSettings != Grip.AdvancedPhysicsSettings)
+				if ( !FMath::IsNearlyEqual(Grip.ValueCache.CachedStiffness, Grip.Stiffness) || !FMath::IsNearlyEqual(Grip.ValueCache.CachedDamping, Grip.Damping) || Grip.ValueCache.CachedPhysicsSettings != Grip.AdvancedGripSettings.PhysicsSettings)
 				{
 					SetGripConstraintStiffnessAndDamping(&Grip);
 				}
@@ -248,7 +267,7 @@ public:
 		Grip.ValueCache.CachedGripMovementReplicationSetting = Grip.GripMovementReplicationSetting;
 		Grip.ValueCache.CachedStiffness = Grip.Stiffness;
 		Grip.ValueCache.CachedDamping = Grip.Damping;
-		Grip.ValueCache.CachedAdvancedPhysicsSettings = Grip.AdvancedPhysicsSettings;
+		Grip.ValueCache.CachedPhysicsSettings = Grip.AdvancedGripSettings.PhysicsSettings;
 
 		return true;
 	}
@@ -311,6 +330,10 @@ public:
 	UFUNCTION(Unreliable, Server, WithValidation)
 	void Server_SendControllerTransform(FBPVRComponentPosRep NewTransform);
 
+	// Pointer to an override to call from the owning character - this saves 7 bits a rep avoiding component IDs on the RPC
+	typedef void (AVRBaseCharacter::*VRBaseCharTransformRPC_Pointer)(FBPVRComponentPosRep NewTransform);
+	VRBaseCharTransformRPC_Pointer OverrideSendTransform;
+
 	// Need this as I can't think of another way for an actor component to make sure it isn't on the server
 	inline bool IsLocallyControlled() const
 	{
@@ -365,7 +388,7 @@ public:
 	// Auto drop any uobject that is/root is a primitive component and has the VR Grip Interface	
 	UFUNCTION(BlueprintCallable, Category = "VRGrip")
 		bool DropObject(
-			UObject * ObjectToDrop, 
+			UObject * ObjectToDrop,
 			bool bSimulate,
 			FVector OptionalAngularVelocity = FVector::ZeroVector,
 			FVector OptionalLinearVelocity = FVector::ZeroVector);
@@ -550,9 +573,9 @@ public:
 
 	// Converts a worldspace transform into being relative to this motion controller, optionally can check interface settings for a given object as well to modify the given transform
 	UFUNCTION(BlueprintPure, Category = "VRGrip")
-	FTransform ConvertToControllerRelativeTransform(const FTransform & InTransform, UObject * OptionalObjectToCheck = NULL)
+	FTransform ConvertToControllerRelativeTransform(const FTransform & InTransform/*, UObject * OptionalObjectToCheck = NULL*/)
 	{
-		if (OptionalObjectToCheck)
+		/*if (OptionalObjectToCheck)
 		{
 			if (OptionalObjectToCheck->GetClass()->ImplementsInterface(UVRGripInterface::StaticClass()))
 			{
@@ -565,7 +588,7 @@ public:
 					return InTransform.GetRelativeTransform(ModifiedTransform);
 				}
 			}
-		}
+		}*/
 
 		return InTransform.GetRelativeTransform(this->GetComponentTransform());
 	}
@@ -720,7 +743,7 @@ public:
 	// Adds a secondary attachment point to the grip
 	// bUseLegacySecondaryLogic enables new singularity removal code, leave true to keep original behavior
 	UFUNCTION(BlueprintCallable, Category = "VRGrip")
-	bool AddSecondaryAttachmentPoint(UObject * GrippedObjectToAddAttachment, USceneComponent * SecondaryPointComponent, const FTransform &OriginalTransform, bool bTransformIsAlreadyRelative = false, float LerpToTime = 0.25f, float SecondarySmoothingScaler = 1.0f, bool bIsSlotGrip = false);
+	bool AddSecondaryAttachmentPoint(UObject * GrippedObjectToAddAttachment, USceneComponent * SecondaryPointComponent, const FTransform &OriginalTransform, bool bTransformIsAlreadyRelative = false, float LerpToTime = 0.25f,/* float SecondarySmoothingScaler = 1.0f,*/ bool bIsSlotGrip = false);
 
 	// Removes a secondary attachment point from a grip
 	UFUNCTION(BlueprintCallable, Category = "VRGrip")
@@ -770,12 +793,15 @@ private:
 	//bool bIsServer;
 
 	/** View extension object that can persist on the render thread without the motion controller component */
-	class FGripViewExtension : public ISceneViewExtension, public TSharedFromThis<FGripViewExtension, ESPMode::ThreadSafe>
+	class FGripViewExtension : public FSceneViewExtensionBase
 	{
 
 		// #TODO: 4.18 - Uses an auto register base now, revise declaration and implementation
 	public:
-		FGripViewExtension(UGripMotionControllerComponent* InMotionControllerComponent) { MotionControllerComponent = InMotionControllerComponent; }
+		FGripViewExtension(const FAutoRegister& AutoRegister, UGripMotionControllerComponent* InMotionControllerComponent)
+			: FSceneViewExtensionBase(AutoRegister)
+			, MotionControllerComponent(InMotionControllerComponent)
+		{}
 		virtual ~FGripViewExtension() {}
 
 		/** ISceneViewExtension interface */
@@ -786,6 +812,7 @@ private:
 		virtual void PreRenderViewFamily_RenderThread(FRHICommandListImmediate& RHICmdList, FSceneViewFamily& InViewFamily) override;
 
 		virtual int32 GetPriority() const override { return -10; }
+		virtual bool IsActiveThisFrame(class FViewport* InViewport) const;
 
 	private:
 		friend class UGripMotionControllerComponent;
@@ -794,27 +821,6 @@ private:
 		UGripMotionControllerComponent* MotionControllerComponent;
 
 		FExpandedLateUpdateManager LateUpdate;
-
-		/*
-		*	Late update primitive info for accessing valid scene proxy info. From the time the info is gathered
-		*  to the time it is later accessed the render proxy can be deleted. To ensure we only access a proxy that is
-		*  still valid we cache the primitive's scene info AND a pointer to it's own cached index. If the primitive
-		*  is deleted or removed from the scene then attempting to access it via it's index will result in a different
-		*  scene info than the cached scene info.
-		*/
-		/*struct LateUpdatePrimitiveInfo
-		{
-			const int32*			IndexAddress;
-			FPrimitiveSceneInfo*	SceneInfo;
-		};*/
-
-
-		/** Walks the component hierarchy gathering scene proxies */
-		//void GatherLateUpdatePrimitives(USceneComponent* Component, TArray<LateUpdatePrimitiveInfo>& Primitives);
-		//FORCEINLINE void ProcessGripArrayLateUpdatePrimitives(TArray<FBPActorGripInformation> & GripArray);
-
-		/** Primitives that need late update before rendering */
-		//TArray<LateUpdatePrimitiveInfo> LateUpdatePrimitives;
 	};
 	TSharedPtr< FGripViewExtension, ESPMode::ThreadSafe > GripViewExtension;
 

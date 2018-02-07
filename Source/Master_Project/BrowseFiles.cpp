@@ -4,8 +4,8 @@
 #include "BrowseFiles.h"
 #include "DDSLoader.h"
 
-#include "Runtime/ImageWrapper/Public/Interfaces/IImageWrapper.h"
-#include "Runtime/ImageWrapper/Public/Interfaces/IImageWrapperModule.h"
+#include "Runtime/ImageWrapper/Public/IImageWrapper.h"
+#include "Runtime/ImageWrapper/Public/IImageWrapperModule.h"
 
 
 bool UBrowseFiles::getFilesandFolders(TArray<FString>& Files, FString RootFolderFullPath, FString Ext)
@@ -57,7 +57,7 @@ bool UBrowseFiles::getFilesandFoldersRecursively(TArray<FString>& Files, FString
 	return true;
 }
 
-static IImageWrapperPtr GetImageWrapperByExtention(const FString InImagePath)
+static TSharedPtr<IImageWrapper> GetImageWrapperByExtention(const FString InImagePath)
 {
 	IImageWrapperModule& ImageWrapperModule = FModuleManager::LoadModuleChecked<IImageWrapperModule>(FName("ImageWrapper"));
 	if (InImagePath.EndsWith(".png"))
@@ -145,7 +145,7 @@ bool UBrowseFiles::ModifiedCaptureComponent2D_SaveImage(class USceneCaptureCompo
 		Pixel.A = ((Pixel.R == ClearFColour.R) && (Pixel.G == ClearFColour.G) && (Pixel.B == ClearFColour.B)) ? 0 : 255;
 	}
 
-	IImageWrapperPtr ImageWrapper = GetImageWrapperByExtention(ImagePath);
+	TSharedPtr<IImageWrapper> ImageWrapper = GetImageWrapperByExtention(ImagePath);
 
 	if (ImageWrapper.IsValid() && ImageWrapper->SetRaw(&RawPixels[0], RawPixels.Num() * sizeof(FColor), width, height, ERGBFormat::RGBA, 8))
 	{

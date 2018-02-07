@@ -16,14 +16,14 @@
 #include "Engine/Engine.h"
 #include "Components/PrimitiveComponent.h"
 #include "Animation/AnimMontage.h"
-#include "PhysicsEngine/DestructibleActor.h"
+//#include "PhysicsEngine/DestructibleActor.h"
 
 // @todo this is here only due to circular dependency to AIModule. To be removed
 #include "Navigation/PathFollowingComponent.h"
 #include "AI/Navigation/AvoidanceManager.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/BrushComponent.h"
-#include "Components/DestructibleComponent.h"
+//#include "Components/DestructibleComponent.h"
 
 #include "Engine/DemoNetDriver.h"
 #include "Engine/NetworkObjectList.h"
@@ -507,7 +507,7 @@ void UVRSimpleCharacterMovementComponent::PhysFalling(float deltaTime, int32 Ite
 		bJustTeleported = false;
 
 		RestorePreAdditiveRootMotionVelocity();
-		RestorePreAdditiveVRMotionVelocity();
+		//RestorePreAdditiveVRMotionVelocity();
 
 		FVector OldVelocity = Velocity;
 		FVector VelocityNoAirControl = Velocity;
@@ -549,7 +549,7 @@ void UVRSimpleCharacterMovementComponent::PhysFalling(float deltaTime, int32 Ite
 		const FVector AirControlAccel = (Velocity - VelocityNoAirControl) / timeTick;
 
 		ApplyRootMotionToVelocity(timeTick);
-		ApplyVRMotionToVelocity(deltaTime);
+		//ApplyVRMotionToVelocity(timeTick);
 
 		if (bNotifyApex && CharacterOwner->Controller && (Velocity.Z <= 0.f))
 		{
@@ -561,7 +561,7 @@ void UVRSimpleCharacterMovementComponent::PhysFalling(float deltaTime, int32 Ite
 
 		// Move
 		FHitResult Hit(1.f);
-		FVector Adjusted = 0.5f*(OldVelocity + Velocity) * timeTick;
+		FVector Adjusted = (0.5f*(OldVelocity + Velocity) * timeTick) + (AdditionalVRInputVector /** timeTick*/);
 		SafeMoveUpdatedComponent(Adjusted, PawnRotation, true, Hit);
 
 		if (!HasValidData())
@@ -799,7 +799,7 @@ void UVRSimpleCharacterMovementComponent::PhysWalking(float deltaTime, int32 Ite
 		}
 
 		ApplyRootMotionToVelocity(timeTick);
-		ApplyVRMotionToVelocity(deltaTime);
+		ApplyVRMotionToVelocity(timeTick);
 
 		checkCode(ensureMsgf(!Velocity.ContainsNaN(), TEXT("PhysWalking: Velocity contains NaN after Root Motion application (%s)\n%s"), *GetPathNameSafe(this), *Velocity.ToString()));
 
@@ -985,11 +985,19 @@ void UVRSimpleCharacterMovementComponent::TickComponent(float DeltaTime, enum EL
 			FQuat curRot;
 			bool bWasHeadset = false;
 
-			if (GEngine->HMDDevice.IsValid() /* #TODO: 4.18 - replace with OXR version*/ && GEngine->HMDDevice->IsHeadTrackingAllowed() && GEngine->HMDDevice->HasValidTrackingPosition())
+			if (GEngine->XRSystem.IsValid() && GEngine->XRSystem->IsHeadTrackingAllowed())
 			{
 				bWasHeadset = true;
-				GEngine->HMDDevice->GetCurrentOrientationAndPosition(curRot, curCameraLoc);
-				curCameraRot = curRot.Rotator();
+
+				if (GEngine->XRSystem->GetCurrentPose(IXRTrackingSystem::HMDDeviceId, curRot, curCameraLoc))
+				{
+					curCameraRot = curRot.Rotator();
+				}
+				else
+				{
+					curCameraLoc = lastCameraLoc;
+					curCameraRot = lastCameraRot;
+				}
 			}
 			else if (VRCameraComponent)
 			{
@@ -1000,12 +1008,11 @@ void UVRSimpleCharacterMovementComponent::TickComponent(float DeltaTime, enum EL
 
 			if (!bIsFirstTick)
 			{
-				// Can adjust the relative tolerances to remove jitter and some update processing
-				if (!(curCameraLoc - lastCameraLoc).IsNearlyZero(0.001f) || !(curCameraRot - lastCameraRot).IsNearlyZero(0.001f))
-				{
-					FVector DifferenceFromLastFrame = (curCameraLoc - lastCameraLoc);
-					//DifferenceFromLastFrame.Z = 0.0f;
+				FVector DifferenceFromLastFrame = (curCameraLoc - lastCameraLoc);
 
+				// Can adjust the relative tolerances to remove jitter and some update processing
+				if (!DifferenceFromLastFrame.IsNearlyZero(0.001f) /*|| !(curCameraRot - lastCameraRot).IsNearlyZero(0.001f)*/)
+				{
 					if (VRRootCapsule)
 					{
 						DifferenceFromLastFrame *= VRRootCapsule->GetComponentScale(); // Scale up with character
@@ -1022,7 +1029,10 @@ void UVRSimpleCharacterMovementComponent::TickComponent(float DeltaTime, enum EL
 				bIsFirstTick = false;
 
 			if (bWasHeadset)
+			{
 				lastCameraLoc = curCameraLoc;
+				lastCameraRot = curCameraRot;
+			}
 			else
 				lastCameraLoc = FVector::ZeroVector; // Technically this would be incorrect for Z, but we don't use Z anyway
 		}
@@ -1638,12 +1648,13 @@ void UVRSimpleCharacterMovementComponent::ServerMoveVR_Implementation(
 		}
 
 		// Add in VR Input velocity
-		AdditionalVRInputVector = FVector(LFDiff.Z, LFDiff.Y, 0.0f);
+		AdditionalVRInputVector = FVector(LFDiff.X, LFDiff.Y, 0.0f);
 
 		if (VRReplicateCapsuleHeight && LFDiff.Z != VRRootCapsule->GetUnscaledCapsuleHalfHeight())
 			VRRootCapsule->SetCapsuleHalfHeight(LFDiff.Z, false);
 
 		CustomVRInputVector = ConditionalReps.CustomVRInputVector;//CustVRInputVector;
+		MoveAction = ConditionalReps.MoveAction;
 
 		MoveAutonomous(TimeStamp, DeltaTime, MoveFlags, Accel);
 		bHasRequestedVelocity = false;

@@ -3,6 +3,9 @@
 #include "ReplicatedVRCameraComponent.h"
 #include "Net/UnrealNetwork.h"
 #include "Engine/Engine.h"
+#include "IXRTrackingSystem.h"
+#include "IXRCamera.h"
+#include "VRBaseCharacter.h"
 #include "IHeadMountedDisplay.h"
 
 
@@ -29,6 +32,8 @@ UReplicatedVRCameraComponent::UReplicatedVRCameraComponent(const FObjectInitiali
 	bLerpingPosition = false;
 	bReppedOnce = false;
 
+	OverrideSendTransform = nullptr;
+
 	//bUseVRNeckOffset = true;
 	//VRNeckOffset = FTransform(FRotator::ZeroRotator, FVector(15.0f,0,0), FVector(1.0f));
 
@@ -45,7 +50,7 @@ void UReplicatedVRCameraComponent::GetLifetimeReplicatedProps(TArray< class FLif
 	//Super::GetLifetimeReplicatedProps(OutLifetimeProps);
 
 	// Skipping the owner with this as the owner will use the location directly
-	DOREPLIFETIME_CONDITION(UReplicatedVRCameraComponent, ReplicatedTransform, COND_SkipOwner);
+	DOREPLIFETIME_CONDITION(UReplicatedVRCameraComponent, ReplicatedCameraTransform, COND_SkipOwner);
 	DOREPLIFETIME(UReplicatedVRCameraComponent, NetUpdateRate);
 	//DOREPLIFETIME(UReplicatedVRCameraComponent, bReplicateTransform);
 }
@@ -61,19 +66,19 @@ void UReplicatedVRCameraComponent::GetLifetimeReplicatedProps(TArray< class FLif
 	DOREPLIFETIME_ACTIVE_OVERRIDE(USceneComponent, RelativeScale3D, false);
 }*/
 
-void UReplicatedVRCameraComponent::Server_SendTransform_Implementation(FBPVRComponentPosRep NewTransform)
+void UReplicatedVRCameraComponent::Server_SendCameraTransform_Implementation(FBPVRComponentPosRep NewTransform)
 {
 	// Store new transform and trigger OnRep_Function
-	ReplicatedTransform = NewTransform;
+	ReplicatedCameraTransform = NewTransform;
 
 	// Don't call on rep on the server if the server controls this controller
 	if (!bHasAuthority)
 	{
-		OnRep_ReplicatedTransform();
+		OnRep_ReplicatedCameraTransform();
 	}
 }
 
-bool UReplicatedVRCameraComponent::Server_SendTransform_Validate(FBPVRComponentPosRep NewTransform)
+bool UReplicatedVRCameraComponent::Server_SendCameraTransform_Validate(FBPVRComponentPosRep NewTransform)
 {
 	return true;
 	// Optionally check to make sure that player is inside of their bounds and deny it if they aren't?
@@ -109,13 +114,14 @@ void UReplicatedVRCameraComponent::TickComponent(float DeltaTime, enum ELevelTic
 	// Don't do any of the below if we aren't the host
 	if (bHasAuthority)
 	{
+
 		// For non view target positional updates (third party and the like)
-		if (bSetPositionDuringTick && bLockToHmd && GEngine->HMDDevice.IsValid() /* #TODO: 4.18 - replace with OXR version*/ && GEngine->HMDDevice->IsHeadTrackingAllowed() && GEngine->HMDDevice->HasValidTrackingPosition())
+		if (bSetPositionDuringTick && bLockToHmd && GEngine->XRSystem.IsValid() && GEngine->XRSystem->IsHeadTrackingAllowed())
 		{
 			//ResetRelativeTransform();
 			FQuat Orientation;
 			FVector Position;
-			if (GEngine->HMDDevice->UpdatePlayerCamera(Orientation, Position))
+			if (GEngine->XRSystem->GetCurrentPose(IXRTrackingSystem::HMDDeviceId, Orientation, Position))
 			{
 				if (bOffsetByHMD)
 				{
@@ -131,19 +137,31 @@ void UReplicatedVRCameraComponent::TickComponent(float DeltaTime, enum ELevelTic
 		if (bReplicates)
 		{
 			// Don't rep if no changes
-			if (!this->RelativeLocation.Equals(ReplicatedTransform.Position) ||  !this->RelativeRotation.Equals(ReplicatedTransform.Rotation))
+			if (!this->RelativeLocation.Equals(ReplicatedCameraTransform.Position) ||  !this->RelativeRotation.Equals(ReplicatedCameraTransform.Rotation))
 			{
 				NetUpdateCount += DeltaTime;
 
 				if (NetUpdateCount >= (1.0f / NetUpdateRate))
 				{
 					NetUpdateCount = 0.0f;
-					ReplicatedTransform.Position = this->RelativeLocation;
-					ReplicatedTransform.Rotation = this->RelativeRotation;
+					ReplicatedCameraTransform.Position = this->RelativeLocation;
+					ReplicatedCameraTransform.Rotation = this->RelativeRotation;
 
-					// Don't bother with any of this if not replicating transform
-					if (GetNetMode() == NM_Client)	//if (bHasAuthority && bReplicateTransform)
-						Server_SendTransform(ReplicatedTransform);
+
+					if (GetNetMode() == NM_Client)
+					{
+						AVRBaseCharacter * OwningChar = Cast<AVRBaseCharacter>(GetOwner());
+						if (OverrideSendTransform != nullptr && OwningChar != nullptr)
+						{
+							(OwningChar->* (OverrideSendTransform))(ReplicatedCameraTransform);
+						}
+						else
+						{
+							// Don't bother with any of this if not replicating transform
+							//if (bHasAuthority && bReplicateTransform)
+							Server_SendCameraTransform(ReplicatedCameraTransform);
+						}
+					}
 				}
 			}
 		}
@@ -157,7 +175,7 @@ void UReplicatedVRCameraComponent::TickComponent(float DeltaTime, enum ELevelTic
 
 			if (LerpVal >= 1.0f)
 			{
-				SetRelativeLocationAndRotation(ReplicatedTransform.Position, ReplicatedTransform.Rotation);
+				SetRelativeLocationAndRotation(ReplicatedCameraTransform.Position, ReplicatedCameraTransform.Rotation);
 
 				// Stop lerping, wait for next update if it is delayed or lost then it will hitch here
 				// Actual prediction might be something to consider in the future, but rough to do in VR
@@ -171,8 +189,8 @@ void UReplicatedVRCameraComponent::TickComponent(float DeltaTime, enum ELevelTic
 			{
 				// Removed variables to speed this up a bit
 				SetRelativeLocationAndRotation(
-					FMath::Lerp(LastUpdatesRelativePosition, (FVector)ReplicatedTransform.Position, LerpVal),
-					FMath::Lerp(LastUpdatesRelativeRotation, ReplicatedTransform.Rotation, LerpVal)
+					FMath::Lerp(LastUpdatesRelativePosition, (FVector)ReplicatedCameraTransform.Position, LerpVal),
+					FMath::Lerp(LastUpdatesRelativeRotation, ReplicatedCameraTransform.Rotation, LerpVal)
 				);
 			}
 		}
@@ -189,23 +207,37 @@ void UReplicatedVRCameraComponent::GetCameraView(float DeltaTime, FMinimalViewIn
 			bLockToHmd = false;
 	}
 
-	if (bLockToHmd && GEngine->HMDDevice.IsValid() /* #TODO: 4.18 - replace with OXR version*/ && GEngine->HMDDevice->IsHeadTrackingAllowed() && GEngine->HMDDevice->HasValidTrackingPosition())
+	if (bLockToHmd && GEngine->XRSystem.IsValid() && GetWorld()->WorldType != EWorldType::Editor)
 	{
-		ResetRelativeTransform();
-		const FTransform ParentWorld = GetComponentToWorld();
-		GEngine->HMDDevice->SetupLateUpdate(ParentWorld, this);
+		IXRTrackingSystem* XRSystem = GEngine->XRSystem.Get();
 
-		FQuat Orientation;
-		FVector Position;
-		if (GEngine->HMDDevice->UpdatePlayerCamera(Orientation, Position))
+		auto XRCamera = XRSystem->GetXRCamera();
+		if (XRSystem->IsHeadTrackingAllowed() && XRCamera.IsValid())
 		{
-			if (bOffsetByHMD)
+			const FTransform ParentWorld = CalcNewComponentToWorld(FTransform());
+			XRCamera->SetupLateUpdate(ParentWorld, this);
+			
+			FQuat Orientation;
+			FVector Position;
+			if (XRCamera->UpdatePlayerCamera(Orientation, Position))
 			{
-				Position.X = 0;
-				Position.Y = 0;
+				if (bOffsetByHMD)
+				{
+					Position.X = 0;
+					Position.Y = 0;
+				}
+
+				SetRelativeTransform(FTransform(Orientation, Position));
+			}
+			else
+			{
+				SetRelativeScale3D(FVector(1.0f));
+				//ResetRelativeTransform(); stop doing this, it is problematic
+				// Let the camera freeze in the last position instead
+				// Setting scale by itself makes sure we don't get camera scaling but keeps the last location and rotation alive
 			}
 
-			SetRelativeTransform(FTransform(Orientation, Position));
+			XRCamera->OverrideFOV(this->FieldOfView);
 		}
 	}
 
@@ -223,26 +255,14 @@ void UReplicatedVRCameraComponent::GetCameraView(float DeltaTime, FMinimalViewIn
 		}
 	}
 
-	if (bUseAdditiveOffset)//bUseVRNeckOffset)
+	if (bUseAdditiveOffset)
 	{
-		FTransform OffsetCamToBaseCam = AdditiveOffset;//VRNeckOffset;
+		FTransform OffsetCamToBaseCam = AdditiveOffset;
 		FTransform BaseCamToWorld = GetComponentToWorld();
 		FTransform OffsetCamToWorld = OffsetCamToBaseCam * BaseCamToWorld;
 
 		DesiredView.Location = OffsetCamToWorld.GetLocation();
 		DesiredView.Rotation = OffsetCamToWorld.Rotator();
-
-#if WITH_EDITORONLY_DATA
-		if (ProxyMeshComponent)
-		{
-			ResetProxyMeshTransform();
-
-			FTransform LocalTransform = ProxyMeshComponent->GetRelativeTransform();
-			FTransform WorldTransform = LocalTransform * OffsetCamToWorld;
-
-			ProxyMeshComponent->SetWorldTransform(WorldTransform);
-		}
-#endif
 	}
 	else
 	{
@@ -265,8 +285,4 @@ void UReplicatedVRCameraComponent::GetCameraView(float DeltaTime, FMinimalViewIn
 	{
 		DesiredView.PostProcessSettings = PostProcessSettings;
 	}
-
-#if WITH_EDITOR
-	ResetProxyMeshTransform();
-#endif //WITH_EDITOR
 }

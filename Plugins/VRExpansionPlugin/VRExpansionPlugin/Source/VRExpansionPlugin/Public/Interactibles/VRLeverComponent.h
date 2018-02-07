@@ -24,7 +24,8 @@ UENUM(Blueprintable)
 enum class EVRInteractibleLeverAxis : uint8
 {
 	Axis_X,
-	Axis_Y
+	Axis_Y,
+	Axis_XY
 };
 
 UENUM(Blueprintable)
@@ -57,8 +58,189 @@ class VREXPANSIONPLUGIN_API UVRLeverComponent : public UStaticMeshComponent, pub
 	UPROPERTY(BlueprintAssignable, Category = "VRLeverComponent")
 		FVRLeverStateChangedSignature OnLeverStateChanged;
 
+	UFUNCTION(BlueprintImplementableEvent, meta = (DisplayName = "Lever State Changed"))
+		void ReceiveLeverStateChanged(bool LeverStatus, EVRInteractibleLeverEventType LeverStatusType, float LeverAngleAtTime);
+
+	// Primary axis angle only
 	UPROPERTY(BlueprintReadOnly, Category = "VRLeverComponent")
 		float CurrentLeverAngle;
+
+	// Bearing Direction, for X/Y is their signed direction, for XY mode it is an actual 2D directional vector
+	UPROPERTY(BlueprintReadOnly, Category = "VRLeverComponent")
+		FVector CurrentLeverForwardVector;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VRLeverComponent")
+		bool bIsPhysicsLever;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VRLeverComponent")
+		bool bUngripAtTargetRotation;
+
+	// Rotation axis to use, XY is combined X and Y, only LerpToZero and PositiveLimits work with this mode
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VRLeverComponent")
+		EVRInteractibleLeverAxis LeverRotationAxis;
+
+	// The percentage of the angle at witch the lever will toggle
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VRLeverComponent", meta = (ClampMin = "0.01", ClampMax = "1.0", UIMin = "0.01", UIMax = "1.0"))
+		float LeverTogglePercentage;
+
+	// The max angle of the lever in the positive direction
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VRLeverComponent", meta = (ClampMin = "0.0", ClampMax = "179.8", UIMin = "0.0", UIMax = "180.0"))
+		float LeverLimitPositive;
+
+	// The max angle of the lever in the negative direction
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VRLeverComponent", meta = (ClampMin = "0.0", ClampMax = "179.8", UIMin = "0.0", UIMax = "180.0"))
+		float LeverLimitNegative;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VRLeverComponent")
+		EVRInteractibleLeverReturnType LeverReturnTypeWhenReleased;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VRLeverComponent")
+		bool bSendLeverEventsDuringLerp;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VRLeverComponent")
+		float LeverReturnSpeed;
+
+	UPROPERTY(BlueprintReadOnly, Category = "VRLeverComponent")
+		bool bIsLerping;
+
+	float LastDeltaAngle;
+	FTransform InitialRelativeTransform;
+	FVector InitialInteractorLocation;
+	FVector InitialInteractorDropLocation;
+	float InitialGripRot;
+	float RotAtGrab;
+	FQuat qRotAtGrab;
+	bool bLeverState;
+
+
+	float CalcAngle(EVRInteractibleLeverAxis AxisToCalc, FVector CurInteractorLocation)
+	{
+		float ReturnAxis = 0.0f;
+
+		if (AxisToCalc == EVRInteractibleLeverAxis::Axis_X)
+			ReturnAxis = FMath::RadiansToDegrees(FMath::Atan2(CurInteractorLocation.Y, CurInteractorLocation.Z)) - InitialGripRot;
+		else
+			ReturnAxis = FMath::RadiansToDegrees(FMath::Atan2(CurInteractorLocation.Z, CurInteractorLocation.X)) - InitialGripRot;
+
+		// Ignore rotations that would flip the angle of the lever to the other side, with a 90 degree allowance
+		if (!FMath::IsNearlyZero(LastDeltaAngle) && FMath::Sign(FRotator::NormalizeAxis(RotAtGrab + ReturnAxis)) != FMath::Sign(LastDeltaAngle) && FMath::Abs(LastDeltaAngle) > 90.0f)
+		{
+			ReturnAxis = LastDeltaAngle;
+		}
+
+		ReturnAxis = FMath::ClampAngle(FRotator::NormalizeAxis(RotAtGrab + ReturnAxis), -LeverLimitNegative, LeverLimitPositive);
+
+		return ReturnAxis;
+	}
+
+	/*float CalcAngleNumber(EVRInteractibleLeverAxis AxisToCalc, FTransform & CurrentRelativeTransform)
+	{
+		FQuat RotTransform = FQuat::Identity;
+
+		if (AxisToCalc == EVRInteractibleLeverAxis::Axis_X)
+			RotTransform = FRotator(FRotator(0.0, -90.0, 0.0)).Quaternion(); // Correct for roll and DotProduct
+
+		FQuat newInitRot = (InitialRelativeTransform.GetRotation() * RotTransform);
+
+		FVector v1 = (CurrentRelativeTransform.GetRotation() * RotTransform).Vector();
+		FVector v2 = (newInitRot).Vector();
+		v1.Normalize();
+		v2.Normalize();
+
+		FVector CrossP = FVector::CrossProduct(v1, v2);
+
+		float angle = FMath::RadiansToDegrees(FMath::Atan2(CrossP.Size(), FVector::DotProduct(v1, v2)));
+		angle *= FMath::Sign(FVector::DotProduct(CrossP, newInitRot.GetRightVector()));
+
+		return angle;
+	}*/
+
+	void LerpAxis(float CurrentAngle, float DeltaTime)
+	{
+		float TargetAngle = 0.0f;
+
+		switch (LeverReturnTypeWhenReleased)
+		{
+		case EVRInteractibleLeverReturnType::LerpToMax:
+		{
+			if (CurrentLeverAngle >= 0)
+				TargetAngle = FMath::RoundToFloat(LeverLimitPositive);
+			else
+				TargetAngle = -FMath::RoundToFloat(LeverLimitNegative);
+		}break;
+		case EVRInteractibleLeverReturnType::LerpToMaxIfOverThreshold:
+		{
+			if ((!FMath::IsNearlyZero(LeverLimitPositive) && CurrentLeverAngle >= (LeverLimitPositive * LeverTogglePercentage)))
+				TargetAngle = FMath::RoundToFloat(LeverLimitPositive);
+			else if ((!FMath::IsNearlyZero(LeverLimitNegative) && CurrentLeverAngle <= -(LeverLimitNegative * LeverTogglePercentage)))
+				TargetAngle = -FMath::RoundToFloat(LeverLimitNegative);
+			//else - Handled by the default value
+			//TargetAngle = 0.0f;
+		}break;
+		case EVRInteractibleLeverReturnType::ReturnToZero:
+		default:
+		{}break;
+		}
+
+		float LerpedVal = FMath::FixedTurn(CurrentAngle, TargetAngle, LeverReturnSpeed * DeltaTime);
+		//float LerpedVal = FMath::FInterpConstantTo(angle, TargetAngle, DeltaTime, LeverReturnSpeed);
+		if (FMath::IsNearlyEqual(LerpedVal, TargetAngle))
+		{
+			this->SetComponentTickEnabled(false);
+			this->SetRelativeRotation((FTransform(SetAxisValue(TargetAngle, FRotator::ZeroRotator)) * InitialRelativeTransform).Rotator());
+		}
+		else
+		{
+				this->SetRelativeRotation((FTransform(SetAxisValue(LerpedVal, FRotator::ZeroRotator)) * InitialRelativeTransform).Rotator());
+		}
+	}
+
+	void CalculateCurrentAngle(FTransform & CurrentRelativeTransform)
+	{
+		float Angle;
+
+		if (LeverRotationAxis == EVRInteractibleLeverAxis::Axis_XY)
+		{
+			// Manually calculating the angle here because RotationBetween() from FQuat uses Yaw/Pitch so roll would be incorrect
+			FVector qAxis;
+			float qAngle;
+
+			(CurrentRelativeTransform * InitialRelativeTransform.Inverse()).GetRotation().ToAxisAndAngle(qAxis, qAngle);
+
+			CurrentLeverAngle = FMath::RoundToFloat(FMath::RadiansToDegrees(qAngle));
+			qAxis.Z = 0.0f; // Doing 2D axis values
+			CurrentLeverForwardVector = -qAxis;
+		}
+		else
+		{
+			// Faster method to get the angle
+			Angle = GetAxisValue((CurrentRelativeTransform * InitialRelativeTransform.Inverse()).Rotator().GetNormalized());
+
+			if (LeverRotationAxis == EVRInteractibleLeverAxis::Axis_X)
+			{
+				CurrentLeverAngle = FMath::RoundToFloat(Angle);
+				CurrentLeverForwardVector = FVector(FMath::Sign(Angle), 0.0f, 0.0f);
+			}
+			else
+			{
+				CurrentLeverAngle = FMath::RoundToFloat(Angle);
+				CurrentLeverForwardVector = FVector(0.0f, FMath::Sign(Angle), 0.0f);
+			}
+		}
+	}
+
+	FTransform GetCurrentParentTransform()
+	{
+		if (ParentComponent.IsValid())
+		{
+			// during grip there is no parent so we do this, might as well do it anyway for lerping as well
+			return ParentComponent->GetComponentTransform();
+		}
+		else
+		{
+			return FTransform::Identity;
+		}
+	}
 
 	// ------------------------------------------------
 	// Gameplay tag interface
@@ -90,50 +272,17 @@ class VREXPANSIONPLUGIN_API UVRLeverComponent : public UStaticMeshComponent, pub
 	virtual void TickComponent(float DeltaTime, enum ELevelTick TickType, FActorComponentTickFunction *ThisTickFunction) override;
 	virtual void BeginPlay() override;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VRLeverComponent")
-		bool bIsPhysicsLever;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VRLeverComponent")
-		bool bUngripAtTargetRotation;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VRLeverComponent")
-		EVRInteractibleLeverAxis LeverRotationAxis;
-
-	// The percentage of the angle at witch the lever will toggle
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VRLeverComponent", meta = (ClampMin = "0.01", ClampMax = "1.0", UIMin = "0.01", UIMax = "1.0"))
-		float LeverTogglePercentage;
-
-	// The max angle of the lever in the positive direction
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VRLeverComponent", meta = (ClampMin = "0.0", ClampMax = "179.8", UIMin = "0.0", UIMax = "180.0"))
-		float LeverLimitPositive;
-
-	// The max angle of the lever in the negative direction
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VRLeverComponent", meta = (ClampMin = "0.0", ClampMax = "179.8", UIMin = "0.0", UIMax = "180.0"))
-		float LeverLimitNegative;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VRLeverComponent")
-		EVRInteractibleLeverReturnType LeverReturnTypeWhenReleased;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VRLeverComponent")
-		bool bSendLeverEventsDuringLerp;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VRLeverComponent")
-		float LeverReturnSpeed;
-
-	float lerpCounter;
-	float LastDeltaAngle;
-	bool bIsLerping;
-	FTransform InitialRelativeTransform;
-	FVector InitialInteractorLocation;
-	float InitialGripRot;
-	float RotAtGrab;
-	bool bLeverState;
-
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VRGripInterface")
 		EGripMovementReplicationSettings MovementReplicationSetting;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VRGripInterface")
 		float BreakDistance;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VRGripInterface")
+		float Stiffness;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VRGripInterface")
+		float Damping;
 
 	UPROPERTY(BlueprintReadWrite, Category = "VRGripInterface")
 		bool bDenyGripping;
@@ -190,7 +339,7 @@ class VREXPANSIONPLUGIN_API UVRLeverComponent : public UStaticMeshComponent, pub
 	bool SetupConstraint()
 	{
 #if WITH_PHYSX
-
+		
 		if (HandleData)
 			return true;
 
@@ -212,7 +361,7 @@ class VREXPANSIONPLUGIN_API UVRLeverComponent : public UStaticMeshComponent, pub
 		}
 
 		float rotationalOffset = (LeverLimitPositive - LeverLimitNegative) / 2;
-		FRotator AngularRotationOffset = SetAxisValue(/*LeverLimitOffset*/rotationalOffset, FRotator::ZeroRotator);
+		FRotator AngularRotationOffset = SetAxisValue(rotationalOffset, FRotator::ZeroRotator);
 		FTransform RefFrame2 = FTransform(InitialRelativeTransform.GetRotation() * AngularRotationOffset.Quaternion(), A2Transform.InverseTransformPosition(GetComponentLocation()));
 		
 		ExecuteOnPxRigidDynamicReadWrite(rBodyInstance, [&](PxRigidDynamic* Actor)
@@ -233,7 +382,7 @@ class VREXPANSIONPLUGIN_API UVRLeverComponent : public UStaticMeshComponent, pub
 						ParentBody = PrimComp->BodyInstance.GetPxRigidDynamic_AssumesLocked();
 				}
 
-				NewJoint = PxD6JointCreate(Scene->getPhysics(), ParentBody, U2PTransform(RefFrame2)/*LocalParentTrans*/, Actor, PxTransform(PxIdentity));
+				NewJoint = PxD6JointCreate(Scene->getPhysics(), ParentBody, U2PTransform(RefFrame2), Actor, PxTransform(PxIdentity));
 
 				if (!NewJoint)
 				{
@@ -275,17 +424,17 @@ class VREXPANSIONPLUGIN_API UVRLeverComponent : public UStaticMeshComponent, pub
 					NewJoint->setMotion(PxD6Axis::eY, PxD6Motion::eLOCKED);
 					NewJoint->setMotion(PxD6Axis::eZ, PxD6Motion::eLOCKED);
 
-					NewJoint->setMotion(PxD6Axis::eTWIST, LeverRotationAxis == EVRInteractibleLeverAxis::Axis_X ? PxD6Motion::eLIMITED : PxD6Motion::eLOCKED);
-					NewJoint->setMotion(PxD6Axis::eSWING1, LeverRotationAxis == EVRInteractibleLeverAxis::Axis_Y ? PxD6Motion::eLIMITED : PxD6Motion::eLOCKED);
+					NewJoint->setMotion(PxD6Axis::eTWIST, LeverRotationAxis == EVRInteractibleLeverAxis::Axis_X || LeverRotationAxis == EVRInteractibleLeverAxis::Axis_XY ? PxD6Motion::eLIMITED : PxD6Motion::eLOCKED);
+					NewJoint->setMotion(PxD6Axis::eSWING1, LeverRotationAxis == EVRInteractibleLeverAxis::Axis_Y || LeverRotationAxis == EVRInteractibleLeverAxis::Axis_XY ? PxD6Motion::eLIMITED : PxD6Motion::eLOCKED);
 					NewJoint->setMotion(PxD6Axis::eSWING2, PxD6Motion::eLOCKED);
 
 					const float CorrectedLeverLimit = (LeverLimitPositive + LeverLimitNegative) / 2;
-					const float LeverLimitRad = CorrectedLeverLimit * /*InTwistLimitScale **/ (PI / 180.0f);
-					//PxReal LimitContactDistance = FMath::DegreesToRadians(FMath::Max(1.f, ProfileInstance.ConeLimit.ContactDistance /** InTwistLimitScale*/));
+					const float LeverLimitRad = CorrectedLeverLimit * (PI / 180.0f);
+					//PxReal LimitContactDistance = FMath::DegreesToRadians(FMath::Max(1.f, ProfileInstance.ConeLimit.ContactDistance));
 
 					//The limit values need to be clamped so it will be valid in PhysX
-					PxReal ZLimitAngle = FMath::ClampAngle(CorrectedLeverLimit/** InSwing1LimitScale*/, KINDA_SMALL_NUMBER, 179.9999f) * (PI / 180.0f);
-					PxReal YLimitAngle = FMath::ClampAngle(CorrectedLeverLimit /** InSwing2LimitScale*/, KINDA_SMALL_NUMBER, 179.9999f) * (PI / 180.0f);
+					PxReal ZLimitAngle = FMath::ClampAngle(CorrectedLeverLimit, KINDA_SMALL_NUMBER, 179.9999f) * (PI / 180.0f);
+					PxReal YLimitAngle = FMath::ClampAngle(CorrectedLeverLimit, KINDA_SMALL_NUMBER, 179.9999f) * (PI / 180.0f);
 					//PxReal LimitContactDistance = FMath::DegreesToRadians(FMath::Max(1.f, ProfileInstance.ConeLimit.ContactDistance * FMath::Min(InSwing1LimitScale, InSwing2LimitScale)));
 					
 					NewJoint->setSwingLimit(PxJointLimitCone(YLimitAngle, ZLimitAngle));
@@ -297,6 +446,7 @@ class VREXPANSIONPLUGIN_API UVRLeverComponent : public UStaticMeshComponent, pub
 
 			return false;
 		});
+		
 #else
 		return false;
 #endif // WITH_PHYSX
@@ -319,17 +469,22 @@ class VREXPANSIONPLUGIN_API UVRLeverComponent : public UStaticMeshComponent, pub
 	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "VRGripInterface")
 		bool SimulateOnDrop();
 
-	// Grip type to use when gripping a slot
+	/*// Grip type to use when gripping a slot
 	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "VRGripInterface")
 		EGripCollisionType SlotGripType();
 
 	// Grip type to use when not gripping a slot
 	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "VRGripInterface")
 		EGripCollisionType FreeGripType();
+		*/
 
 	// Secondary grip type
 	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "VRGripInterface")
 		ESecondaryGripType SecondaryGripType();
+
+		// Grip type to use
+	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "VRGripInterface")
+		EGripCollisionType GetPrimaryGripType(bool bIsSlot);
 
 	// Define which movement repliation setting to use
 	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "VRGripInterface")
@@ -339,29 +494,41 @@ class VREXPANSIONPLUGIN_API UVRLeverComponent : public UStaticMeshComponent, pub
 	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "VRGripInterface")
 		EGripLateUpdateSettings GripLateUpdateSetting();
 
-	// What grip stiffness to use if using a physics constraint
+	/*// What grip stiffness to use if using a physics constraint
 	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "VRGripInterface")
 		float GripStiffness();
 
 	// What grip damping to use if using a physics constraint
 	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "VRGripInterface")
 		float GripDamping();
+		*/
+		// What grip stiffness and damping to use if using a physics constraint
+	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "VRGripInterface")
+		void GetGripStiffnessAndDamping(float &GripStiffnessOut, float &GripDampingOut);
 
 	// Get the advanced physics settings for this grip
 	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "VRGripInterface")
-		FBPAdvGripPhysicsSettings AdvancedPhysicsSettings();
+		FBPAdvGripSettings AdvancedGripSettings();
 
 	// What distance to break a grip at (only relevent with physics enabled grips
 	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "VRGripInterface")
 		float GripBreakDistance();
 
-	// Get closest secondary slot in range
+	/*// Get closest secondary slot in range
 	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "VRGripInterface")
 		void ClosestSecondarySlotInRange(FVector WorldLocation, bool & bHadSlotInRange, FTransform & SlotWorldTransform, UGripMotionControllerComponent * CallingController = nullptr, FName OverridePrefix = NAME_None);
 
 	// Get closest primary slot in range
 	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "VRGripInterface")
 		void ClosestPrimarySlotInRange(FVector WorldLocation, bool & bHadSlotInRange, FTransform & SlotWorldTransform, UGripMotionControllerComponent * CallingController = nullptr, FName OverridePrefix = NAME_None);
+		*/
+
+	// Get grip primary slot in range
+	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "VRGripInterface")
+		void ClosestGripSlotInRange(FVector WorldLocation, bool bSecondarySlot, bool & bHadSlotInRange, FTransform & SlotWorldTransform, UGripMotionControllerComponent * CallingController = nullptr, FName OverridePrefix = NAME_None);
+
+
+
 
 	// Check if the object is an interactable
 	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "VRGripInterface")
@@ -427,6 +594,10 @@ class VREXPANSIONPLUGIN_API UVRLeverComponent : public UStaticMeshComponent, pub
 	// Call to stop using an object
 	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "VRGripInterface")
 		void OnEndSecondaryUsed();
+
+	// Call to send an action event to the object
+	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "VRGripInterface")
+		void OnInput(FKey Key, EInputEvent KeyEvent);
 
 	protected:
 

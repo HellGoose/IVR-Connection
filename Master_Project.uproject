@@ -1,6 +1,6 @@
 {
 	"FileVersion": 3,
-	"EngineAssociation": "4.17",
+	"EngineAssociation": "4.18",
 	"Category": "",
 	"Description": "",
 	"Modules": [
@@ -29,15 +29,6 @@
 		{
 			"Name": "OnlineSubsystemSteam",
 			"Enabled": true
-		},
-		{
-			"Name": "VictoryBPLibrary",
-			"Enabled": false,
-			"MarketplaceURL": "http://www.ue4code.com"
-		},
-		{
-			"Name": "VictoryUMG",
-			"Enabled": false
 		},
 		{
 			"Name": "SteamVR",

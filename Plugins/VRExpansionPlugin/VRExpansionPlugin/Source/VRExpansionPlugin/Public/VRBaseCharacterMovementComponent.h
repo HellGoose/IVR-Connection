@@ -23,8 +23,298 @@
  * @see ACharacter, UPawnMovementComponent
  * @see https://docs.unrealengine.com/latest/INT/Gameplay/Framework/Pawn/Character/
  */
+UENUM(Blueprintable)
+enum class EVRMoveAction : uint8
+{
+	VRMOVEACTION_None = 0x00,
+	VRMOVEACTION_SnapTurn = 0x01,
+	VRMOVEACTION_Teleport = 0x02,
+	VRMOVEACTION_StopAllMovement = 0x03,
+	VRMOVEACTION_Reserved1 = 0x04,
+	VRMOVEACTION_CUSTOM1 = 0x05,
+	VRMOVEACTION_CUSTOM2 = 0x06,
+	VRMOVEACTION_CUSTOM3 = 0x07,
+	VRMOVEACTION_CUSTOM4 = 0x08,
+	VRMOVEACTION_CUSTOM5 = 0x09,
+	VRMOVEACTION_CUSTOM6 = 0x0A,
+	VRMOVEACTION_CUSTOM7 = 0x0B,
+	VRMOVEACTION_CUSTOM8 = 0x0C,
+	VRMOVEACTION_CUSTOM9 = 0x0D,
+	VRMOVEACTION_CUSTOM10 = 0x0E,
+};
+
+UENUM(Blueprintable)
+enum class EVRMoveActionDataReq : uint8
+{
+	VRMOVEACTIONDATA_None = 0x00,
+	VRMOVEACTIONDATA_LOC = 0x01,
+	VRMOVEACTIONDATA_ROT = 0x02,
+	VRMOVEACTIONDATA_LOC_AND_ROT = 0x03
+};
+
+
+
+USTRUCT()
+struct VREXPANSIONPLUGIN_API FVRMoveActionContainer
+{
+	GENERATED_USTRUCT_BODY()
+public:
+	UPROPERTY()
+	EVRMoveAction MoveAction;
+	UPROPERTY()
+	EVRMoveActionDataReq MoveActionDataReq;
+	UPROPERTY()
+	FVector MoveActionLoc;
+	UPROPERTY()
+	FRotator MoveActionRot;
+
+	FVRMoveActionContainer()
+	{
+		Clear();
+	}
+
+	void Clear()
+	{
+		MoveAction = EVRMoveAction::VRMOVEACTION_None;
+		MoveActionDataReq = EVRMoveActionDataReq::VRMOVEACTIONDATA_None;
+		MoveActionLoc = FVector::ZeroVector;
+		MoveActionRot = FRotator::ZeroRotator;
+	}
+
+	/** Network serialization */
+	// Doing a custom NetSerialize here because this is sent via RPCs and should change on every update
+	bool NetSerialize(FArchive& Ar, class UPackageMap* Map, bool& bOutSuccess)
+	{
+		bOutSuccess = true;
+		
+		Ar.SerializeBits(&MoveAction, 4); // 16 elements, only allowing 1 per frame, they aren't flags
+
+		switch (MoveAction)
+		{
+		case EVRMoveAction::VRMOVEACTION_None: break;
+		case EVRMoveAction::VRMOVEACTION_SnapTurn:
+		case EVRMoveAction::VRMOVEACTION_Teleport: // Not replicating rot as Control rot does that already
+		{
+			bOutSuccess &= SerializePackedVector<100, 30>(MoveActionLoc, Ar);
+		}break;
+		case EVRMoveAction::VRMOVEACTION_StopAllMovement:
+		{}break;
+		case EVRMoveAction::VRMOVEACTION_Reserved1:
+		{}break;
+		default: // Everything else
+		{
+			// Defines how much to replicate - only 4 possible values, 0 - 3 so only send 2 bits
+			Ar.SerializeBits(&MoveActionDataReq, 2);
+
+			if (((uint8)MoveActionDataReq & (uint8)EVRMoveActionDataReq::VRMOVEACTIONDATA_LOC) != 0)
+				bOutSuccess &= SerializePackedVector<100, 30>(MoveActionLoc, Ar);
+
+			if (((uint8)MoveActionDataReq & (uint8)EVRMoveActionDataReq::VRMOVEACTIONDATA_ROT) != 0)
+				MoveActionRot.SerializeCompressedShort(Ar);
+
+		}break;
+		}
+
+		return bOutSuccess;
+	}
+};
+template<>
+struct TStructOpsTypeTraits< FVRMoveActionContainer > : public TStructOpsTypeTraitsBase2<FVRMoveActionContainer>
+{
+	enum
+	{
+		WithNetSerializer = true
+	};
+};
 
 //DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FAIMoveCompletedSignature, FAIRequestID, RequestID, EPathFollowingResult::Type, Result);
+USTRUCT()
+struct VREXPANSIONPLUGIN_API FVRConditionalMoveRep
+{
+	GENERATED_USTRUCT_BODY()
+public:
+
+	UPROPERTY(Transient)
+		FVector CustomVRInputVector;
+	UPROPERTY(Transient)
+		FVector RequestedVelocity;
+	UPROPERTY(Transient)
+		FVector MoveActionLoc;
+	UPROPERTY(Transient)
+		FRotator MoveActionRot;
+	UPROPERTY(Transient)
+		FVRMoveActionContainer MoveAction;
+
+	FVRConditionalMoveRep()
+	{
+		CustomVRInputVector = FVector::ZeroVector;
+		RequestedVelocity = FVector::ZeroVector;
+	}
+
+	/** Network serialization */
+	// Doing a custom NetSerialize here because this is sent via RPCs and should change on every update
+	bool NetSerialize(FArchive& Ar, class UPackageMap* Map, bool& bOutSuccess)
+	{
+		bOutSuccess = true;
+
+		bool bHasVRinput = !CustomVRInputVector.IsZero();
+		bool bHasRequestedVelocity = !RequestedVelocity.IsZero();
+		bool bHasMoveAction = MoveAction.MoveAction != EVRMoveAction::VRMOVEACTION_None;
+
+		// Defines the level of Quantization
+
+		bool bHasAnyProperties = bHasVRinput || bHasRequestedVelocity || bHasMoveAction;
+		Ar.SerializeBits(&bHasAnyProperties, 1);
+
+		if (bHasAnyProperties)
+		{
+			Ar.SerializeBits(&bHasVRinput, 1);
+			Ar.SerializeBits(&bHasRequestedVelocity, 1);
+			Ar.SerializeBits(&bHasMoveAction, 1);
+
+			if (bHasVRinput)
+				bOutSuccess &= SerializePackedVector<100, 30>(CustomVRInputVector, Ar);
+
+			if (bHasRequestedVelocity)
+				bOutSuccess &= SerializePackedVector<100, 30>(RequestedVelocity, Ar);
+
+			if (bHasMoveAction)
+				MoveAction.NetSerialize(Ar, Map, bOutSuccess);
+		}
+
+		return bOutSuccess;
+	}
+
+};
+
+template<>
+struct TStructOpsTypeTraits< FVRConditionalMoveRep > : public TStructOpsTypeTraitsBase2<FVRConditionalMoveRep>
+{
+	enum
+	{
+		WithNetSerializer = true
+	};
+};
+
+class VREXPANSIONPLUGIN_API FSavedMove_VRBaseCharacter : public FSavedMove_Character
+{
+
+public:
+
+	// Bit masks used by GetCompressedFlags() to encode movement information.
+	/*enum CustomVRCompressedFlags
+	{
+		//FLAG_JumpPressed = 0x01,	// Jump pressed
+		//FLAG_WantsToCrouch = 0x02,	// Wants to crouch
+		//FLAG_Reserved_1 = 0x04,	// Reserved for future use
+		//FLAG_Reserved_2 = 0x08,	// Reserved for future use
+		// Remaining bit masks are available for custom flags.
+		//FLAG_Custom_0 = 0x10,
+		//FLAG_Custom_1 = 0x20,
+		//FLAG_MoveAction = 0x40,//FLAG_Custom_2 = 0x40,
+		//FLAG_SnapTurnRight = 0x80,
+		//FLAG_Custom_3 = 0x80,
+	};*/
+
+	EVRConjoinedMovementModes VRReplicatedMovementMode;
+
+	FVector VRCapsuleLocation;
+	FVector LFDiff;
+	FVector SnapTurnOffset;
+	FRotator VRCapsuleRotation;
+	FVRConditionalMoveRep ConditionalValues;
+
+	void Clear();
+	virtual void SetInitialPosition(ACharacter* C);
+
+	FSavedMove_VRBaseCharacter() : FSavedMove_Character()
+	{
+		VRCapsuleLocation = FVector::ZeroVector;
+		LFDiff = FVector::ZeroVector;
+		VRCapsuleRotation = FRotator::ZeroRotator;
+		VRReplicatedMovementMode = EVRConjoinedMovementModes::C_MOVE_MAX;// _None;
+	}
+
+	virtual uint8 GetCompressedFlags() const override
+	{
+		// Fills in 01 and 02 for Jump / Crouch
+		uint8 Result = FSavedMove_Character::GetCompressedFlags();
+
+		// Not supporting custom movement mode directly at this time by replicating custom index
+		// We use 4 bits for this so a maximum of 16 elements
+		Result |= (uint8)VRReplicatedMovementMode << 2;
+
+		// This takes up custom_2
+		/*if (bWantsToSnapTurn)
+		{
+			Result |= FLAG_SnapTurn;
+		}*/
+
+		// Reserved_1, and Reserved_2, Flag_Custom_0 and Flag_Custom_1 are used up
+		// By the VRReplicatedMovementMode packing
+
+
+		// only custom_2 and custom_3 are left currently
+		return Result;
+	}
+
+	virtual bool CanCombineWith(const FSavedMovePtr& NewMove, ACharacter* Character, float MaxDelta) const override
+	{
+		FSavedMove_VRBaseCharacter * nMove = (FSavedMove_VRBaseCharacter *)NewMove.Get();
+
+
+		if (!nMove || (VRReplicatedMovementMode != nMove->VRReplicatedMovementMode))
+			return false;
+
+		if (ConditionalValues.MoveAction.MoveAction != EVRMoveAction::VRMOVEACTION_None || nMove->ConditionalValues.MoveAction.MoveAction != EVRMoveAction::VRMOVEACTION_None)
+			return false;
+
+		if (!ConditionalValues.CustomVRInputVector.IsZero() || !nMove->ConditionalValues.CustomVRInputVector.IsZero())
+			return false;
+
+		if (!ConditionalValues.RequestedVelocity.IsZero() || !nMove->ConditionalValues.RequestedVelocity.IsZero())
+			return false;
+
+		// Hate this but we really can't combine if I am sending a new capsule height
+		if (!FMath::IsNearlyEqual(LFDiff.Z, nMove->LFDiff.Z))
+			return false;
+
+		if (!LFDiff.IsZero() && !nMove->LFDiff.IsZero() && !FVector::Coincident(LFDiff.GetSafeNormal2D(), nMove->LFDiff.GetSafeNormal2D(), AccelDotThresholdCombine))
+			return false;
+
+		return FSavedMove_Character::CanCombineWith(NewMove, Character, MaxDelta);
+	}
+
+
+	virtual bool IsImportantMove(const FSavedMovePtr& LastAckedMove) const override
+	{
+		// Auto important if toggled climbing
+		if (VRReplicatedMovementMode != EVRConjoinedMovementModes::C_MOVE_MAX)//_None)
+			return true;
+
+		if (!ConditionalValues.CustomVRInputVector.IsZero())
+			return true;
+
+		if (!ConditionalValues.RequestedVelocity.IsZero())
+			return true;
+
+		if (ConditionalValues.MoveAction.MoveAction != EVRMoveAction::VRMOVEACTION_None)
+			return true;
+
+		// #TODO: What to do here?
+		// This is debatable, however it will ALWAYS be non zero realistically and only really effects step ups for the most part
+		//if (!LFDiff.IsNearlyZero())
+		//return true;
+
+		// Else check parent class
+		return FSavedMove_Character::IsImportantMove(LastAckedMove);
+	}
+
+	virtual void PrepMoveFor(ACharacter* Character) override;
+
+	/** Set the properties describing the final position, etc. of the moved pawn. */
+	virtual void PostUpdate(ACharacter* C, EPostUpdateMode PostUpdateMode) override;
+};
 
 
 UCLASS()
@@ -36,6 +326,10 @@ public:
 	UVRBaseCharacterMovementComponent(const FObjectInitializer& ObjectInitializer = FObjectInitializer::Get());
 
 	virtual void PerformMovement(float DeltaSeconds) override;
+	virtual void ReplicateMoveToServer(float DeltaTime, const FVector& NewAcceleration) override;
+
+	// Overriding this to run the seated logic
+	virtual void TickComponent(float DeltaTime, enum ELevelTick TickType, FActorComponentTickFunction *ThisTickFunction) override;
 
 	FORCEINLINE bool HasRequestedVelocity()
 	{
@@ -69,15 +363,44 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "BaseVRCharacterMovementComponent|VRLocations")
 		void AddCustomReplicatedMovement(FVector Movement);
 
+	// Perform a snap turn in line with the move action system
+	UFUNCTION(BlueprintCallable, Category = "VRMovement")
+		void PerformMoveAction_SnapTurn(float SnapTurnDeltaYaw);
+
+	// Perform a teleport in line with the move action system
+	UFUNCTION(BlueprintCallable, Category = "VRMovement")
+		void PerformMoveAction_Teleport(FVector TeleportLocation, FRotator TeleportRotation);
+
+	// Perform StopAllMovementImmediately in line with the move action system
+	UFUNCTION(BlueprintCallable, Category = "VRMovement")
+		void PerformMoveAction_StopAllMovement();
+	
+	// Perform a teleport in line with the move action system
+	UFUNCTION(BlueprintCallable, Category = "VRMovement")
+		void PerformMoveAction_Custom(EVRMoveAction MoveActionToPerform, EVRMoveActionDataReq DataRequirementsForMoveAction, FVector MoveActionVector, FRotator MoveActionRotator);
+
+	FVRMoveActionContainer MoveAction;
+
+	bool bHadMoveActionThisFrame;
+	bool CheckForMoveAction();
+	bool DoMASnapTurn();
+	bool DoMATeleport();
+	bool DoMAStopAllMovement();
+
 	FVector CustomVRInputVector;
 	FVector AdditionalVRInputVector;
-
-	// Injecting custom movement in here, bypasses floor detection
-	//virtual void PerformMovement(float DeltaSeconds) override;
-
-	//inline void ApplyVRMotionToVelocity(float deltaTime);
-	//inline  void RestorePreAdditiveVRMotionVelocity();
 	FVector LastPreAdditiveVRVelocity;
+	bool bApplyAdditionalVRInputVectorAsNegative;
+	
+	// Rewind the relative movement that we had with the HMD
+	inline void RewindVRRelativeMovement();
+
+	bool bWasInPushBack;
+	bool bIsInPushBack;
+	void StartPushBackNotification(FHitResult HitResult);
+	void EndPushBackNotification();
+
+	//virtual void SendClientAdjustment() override;
 
 	inline void ApplyVRMotionToVelocity(float deltaTime)
 	{
@@ -86,22 +409,9 @@ public:
 			LastPreAdditiveVRVelocity = FVector::ZeroVector;
 			return;
 		}
-
+		
 		LastPreAdditiveVRVelocity = (AdditionalVRInputVector) / deltaTime;// Velocity; // Save off pre-additive Velocity for restoration next tick	
 		Velocity += LastPreAdditiveVRVelocity;
-
-		// Switch to Falling if we have vertical velocity from root motion so we can lift off the ground
-		if (!LastPreAdditiveVRVelocity.IsNearlyZero() && LastPreAdditiveVRVelocity.Z != 0.f && IsMovingOnGround())
-		{
-			float LiftoffBound;
-			// Default bounds - the amount of force gravity is applying this tick
-			LiftoffBound = FMath::Max(GetGravityZ() * deltaTime, SMALL_NUMBER);
-
-			if (LastPreAdditiveVRVelocity.Z > LiftoffBound)
-			{
-				SetMovementMode(MOVE_Falling);
-			}
-		}
 	}
 
 	inline void RestorePreAdditiveVRMotionVelocity()
@@ -171,6 +481,14 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VRMovement|Climbing")
 		float VRClimbingMaxReleaseVelocitySize;
 
+	/* Custom distance that is required before accepting a walking stepup
+	*  This is to help promote stepping up, engine default is 0.15f, generally you want it lower than that
+	*  Do NOT set to larger than capsule radius!
+	*  #TODO: Port to SimpleCharacter as well
+	*/
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VRMovement")
+		float VREdgeRejectDistance;
+
 	// If true will replicate the capsule height on to clients, allows for dynamic capsule height changes in multiplayer
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "VRMovement")
 		bool VRReplicateCapsuleHeight;
@@ -200,6 +518,8 @@ public:
 		// If is a custom or VR custom movement mode
 		int32 MovementFlags = (Flags >> 2) & 15;
 		VRReplicatedMovementMode = (EVRConjoinedMovementModes)MovementFlags;
+
+		//bWantsToSnapTurn = ((Flags & FSavedMove_VRBaseCharacter::FLAG_SnapTurn) != 0);
 
 		Super::UpdateFromCompressedFlags(Flags);
 	}
@@ -240,144 +560,5 @@ public:
 
 		Super::ClientVeryShortAdjustPosition_Implementation(TimeStamp, NewLoc, NewBase, NewBaseBoneName, bHasBase, bBaseRelativePosition, ServerMovementMode);
 	}
-};
-
-
-USTRUCT()
-struct VREXPANSIONPLUGIN_API FVRConditionalMoveRep
-{
-	GENERATED_USTRUCT_BODY()
-public:
-
-	UPROPERTY(Transient)
-		FVector CustomVRInputVector;
-	UPROPERTY(Transient)
-		FVector RequestedVelocity;
-
-	FVRConditionalMoveRep()
-	{
-		CustomVRInputVector = FVector::ZeroVector;
-		RequestedVelocity = FVector::ZeroVector;
-	}
-
-	/** Network serialization */
-	// Doing a custom NetSerialize here because this is sent via RPCs and should change on every update
-	bool NetSerialize(FArchive& Ar, class UPackageMap* Map, bool& bOutSuccess)
-	{
-		bOutSuccess = true;
-
-		// Defines the level of Quantization
-		bool bHasVRinput = !CustomVRInputVector.IsZero();
-		Ar.SerializeBits(&bHasVRinput, 1);
-
-		bool bHasRequestedVelocity = !RequestedVelocity.IsZero();
-		Ar.SerializeBits(&bHasRequestedVelocity, 1);
-
-		if(bHasVRinput)
-			bOutSuccess &= SerializePackedVector<100, 30>(CustomVRInputVector, Ar);
-
-		if(bHasRequestedVelocity)
-			bOutSuccess &= SerializePackedVector<100, 30>(RequestedVelocity, Ar);
-
-		return bOutSuccess;
-	}
-
-};
-
-template<>
-struct TStructOpsTypeTraits< FVRConditionalMoveRep > : public TStructOpsTypeTraitsBase2<FVRConditionalMoveRep>
-{
-	enum
-	{
-		WithNetSerializer = true
-	};
-};
-
-class VREXPANSIONPLUGIN_API FSavedMove_VRBaseCharacter : public FSavedMove_Character
-{
-
-public:
-
-	EVRConjoinedMovementModes VRReplicatedMovementMode;
-
-	FVector VRCapsuleLocation;
-	FVector LFDiff;
-	FRotator VRCapsuleRotation;
-	FVRConditionalMoveRep ConditionalValues;
-
-	void Clear();
-	virtual void SetInitialPosition(ACharacter* C);
-
-	FSavedMove_VRBaseCharacter() : FSavedMove_Character()
-	{
-		VRCapsuleLocation = FVector::ZeroVector;
-		LFDiff = FVector::ZeroVector;
-		VRCapsuleRotation = FRotator::ZeroRotator;
-		VRReplicatedMovementMode = EVRConjoinedMovementModes::C_MOVE_MAX;// _None;
-	}
-
-	virtual uint8 GetCompressedFlags() const override
-	{
-		// Fills in 01 and 02 for Jump / Crouch
-		uint8 Result = FSavedMove_Character::GetCompressedFlags();
-
-		// Not supporting custom movement mode directly at this time by replicating custom index
-		// We use 4 bits for this so a maximum of 16 elements
-		Result |= (uint8)VRReplicatedMovementMode << 2;
-
-		// Reserved_1, and Reserved_2, Flag_Custom_0 and Flag_Custom_1 are used up
-		// By the VRReplicatedMovementMode packing
-		// Only custom_2 and custom_3 are left
-
-		return Result;
-	}
-
-	virtual bool CanCombineWith(const FSavedMovePtr& NewMove, ACharacter* Character, float MaxDelta) const override
-	{
-		FSavedMove_VRBaseCharacter * nMove = (FSavedMove_VRBaseCharacter *)NewMove.Get();
-
-
-		if (!nMove || (VRReplicatedMovementMode != nMove->VRReplicatedMovementMode))
-			return false;
-
-		if (!ConditionalValues.CustomVRInputVector.IsZero() || !nMove->ConditionalValues.CustomVRInputVector.IsZero())
-			return false;
-
-		if (!ConditionalValues.RequestedVelocity.IsZero() || !nMove->ConditionalValues.RequestedVelocity.IsZero())
-			return false;
-
-		// Hate this but we really can't combine if I am sending a new capsule height
-		if (!FMath::IsNearlyEqual(LFDiff.Z, nMove->LFDiff.Z))
-			return false;
-	
-		if (!LFDiff.IsZero() && !nMove->LFDiff.IsZero() && !FVector::Coincident(LFDiff.GetSafeNormal2D(), nMove->LFDiff.GetSafeNormal2D(), AccelDotThresholdCombine))
-			return false;
-
-		return FSavedMove_Character::CanCombineWith(NewMove, Character, MaxDelta);
-	}
-
-
-	virtual bool IsImportantMove(const FSavedMovePtr& LastAckedMove) const override
-	{
-		// Auto important if toggled climbing
-		if (VRReplicatedMovementMode != EVRConjoinedMovementModes::C_MOVE_MAX)//_None)
-			return true;
-
-		if (!ConditionalValues.CustomVRInputVector.IsZero())
-			return true;
-
-		if (!ConditionalValues.RequestedVelocity.IsZero())
-			return true;
-
-		// #TODO: What to do here?
-		// This is debatable, however it will ALWAYS be non zero realistically and only really effects step ups for the most part
-		//if (!LFDiff.IsNearlyZero())
-			//return true;
-
-		// Else check parent class
-		return FSavedMove_Character::IsImportantMove(LastAckedMove);
-	}
-
-	virtual void PrepMoveFor(ACharacter* Character) override;
 };
 
